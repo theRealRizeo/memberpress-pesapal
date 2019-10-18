@@ -8,8 +8,6 @@ if ( !class_exists( 'MeprBaseRealGateway' ) ) {
 }
 class MeprPesaPalGateway extends MeprBaseRealGateway {
 
-	public static $pesapal_plan_id_str = '_mepr_pesapal_plan_id';
-
 	/**
 	 * Consumer
 	 *
@@ -77,15 +75,15 @@ class MeprPesaPalGateway extends MeprBaseRealGateway {
 		$this->has_spc_form = true;
 		
 		$this->capabilities = array(
-			'process-credit-cards',
+			//'process-credit-cards',
 			'process-payments',
-			'process-refunds',
+			//'process-refunds',
 			'create-subscriptions',
 			'cancel-subscriptions',
-			'update-subscriptions',
-			'suspend-subscriptions',
-			'resume-subscriptions',
-			'send-cc-expirations'
+			//'update-subscriptions',
+			//'suspend-subscriptions',
+			//'resume-subscriptions',
+			//'send-cc-expirations'
 		);
 	
 		// Setup the notification actions for this gateway
@@ -119,14 +117,10 @@ class MeprPesaPalGateway extends MeprBaseRealGateway {
 				'force_ssl' 			=> false,
 				'debug' 				=> false,
 				'test_mode' 			=> false,
-				'use_pespal_checkout' 	=> false,
 				'churn_buster_enabled' 	=> false,
 				'churn_buster_uuid' 	=> '',
 				'public_key'			=> '',
-				'secret_key'			=> '',
-				'connect_status' 		=> false,
-				'service_account_id' 	=> '',
-				'service_account_name' 	=> '',
+				'secret_key'			=> ''
 			),
 			(array) $this->settings
 		);
@@ -136,10 +130,6 @@ class MeprPesaPalGateway extends MeprBaseRealGateway {
 		$this->use_label 			= $this->settings->use_label;
 		$this->use_icon 			= $this->settings->use_icon;
 		$this->use_desc 			= $this->settings->use_desc;
-		$this->connect_status 		= $this->settings->connect_status;
-		$this->service_account_id 	= $this->settings->service_account_id;
-		$this->service_account_name = $this->settings->service_account_name;
-		$this->has_spc_form 		= $this->settings->use_pespal_checkout ? false : true;
 		//$this->recurrence_type = $this->settings->recurrence_type;
 
 		$this->settings->public_key = trim( $this->settings->public_key );
@@ -246,26 +236,124 @@ class MeprPesaPalGateway extends MeprBaseRealGateway {
 	public function process_trial_payment($transaction) { }
   	public function record_trial_payment($transaction) { }
 
-	public function process_refund( $txn) {}
+	public function process_refund( $txn ) {}
 	public function record_refund() {}
-	public function process_create_subscription($transaction){}
+
+	public function process_create_subscription( $txn ){
+
+		if ( isset($txn) && $txn instanceof MeprTransaction) {
+			$usr = $txn->user();
+      		$prd = $txn->product();
+		} else {
+			return;
+		}
+
+		$sub = $txn->subscription();
+
+		$this->email_status("process_create_subscription: \n" . MeprUtils::object_to_string($txn) . "\n", $this->settings->debug);
+
+		$sub->subscr_id = $txn->trans_num;
+		$sub->store();
+		
+		if ( $txn->status == MeprTransaction::$complete_str ) {
+			MeprUtils::send_signup_notices( $txn );
+		}
+
+		return array( 'subscription' => $sub, 'transaction' => $txn );
+	}
+
 	public function record_create_subscription(){}
-	public function process_update_subscription($subscription_id){}
+	public function process_update_subscription($sub_id){}
 
 	public function record_update_subscription(){}
 
-  	public function process_suspend_subscription($subscription_id){}
+  	public function process_suspend_subscription($sub_id){
+		$sub = new MeprSubscription($sub_id);
+		$this->create_inovice_reminder( $sub );
+		$_REQUEST['recurring_payment_id'] = $sub->subscr_id;
+    	$this->record_suspend_subscription();
+	}
 
-  	public function record_suspend_subscription(){}
+  	public function record_suspend_subscription(){
+		$subscr_id = $_REQUEST['recurring_payment_id'];
+		$sub = MeprSubscription::get_one_by_subscr_id($subscr_id);
+	
+		if(!$sub) { return false; }
+	
+		// Seriously ... if sub was already suspended what are we doing here?
+		if($sub->status == MeprSubscription::$suspended_str) { return $sub; }
+	
+		$sub->status = MeprSubscription::$suspended_str;
+		$sub->store();
+	
+		MeprUtils::send_suspended_sub_notices($sub);
+	
+		return $sub;
+	}
 
-  	public function process_resume_subscription($subscription_id){}
+  	public function process_resume_subscription($sub_id){
+		$sub = new MeprSubscription( $sub_id );
+		$this->create_inovice_reminder( $sub );
+		$_REQUEST['recurring_payment_id'] = $sub->subscr_id;
+    	$this->record_resume_subscription();
+	}
 
-  	public function record_resume_subscription(){}
+  	public function record_resume_subscription(){
+		$subscr_id = $_REQUEST['recurring_payment_id'];
+		$sub = MeprSubscription::get_one_by_subscr_id($subscr_id);
 
-  	public function process_cancel_subscription($subscription_id){}
+		if(!$sub) { return false; }
+
+		// Seriously ... if sub was already active what are we doing here?
+		if($sub->status == MeprSubscription::$active_str) { return $sub; }
+
+		$sub->status = MeprSubscription::$active_str;
+		$sub->store();
+
+		//Check if prior txn is expired yet or not, if so create a temporary txn so the user can access the content immediately
+		$prior_txn = $sub->latest_txn();
+		if( $prior_txn == false || !($prior_txn instanceof MeprTransaction) || strtotime( $prior_txn->expires_at ) < time() ) {
+			$txn = new MeprTransaction();
+			$txn->subscription_id = $sub->id;
+			$txn->trans_num  = $sub->subscr_id . '-' . uniqid();
+			$txn->status     = MeprTransaction::$confirmed_str;
+			$txn->txn_type   = MeprTransaction::$subscription_confirmation_str;
+			$txn->expires_at = MeprUtils::ts_to_mysql_date(time() + MeprUtils::days(1), 'Y-m-d 23:59:59');
+			$txn->set_subtotal(0.00); // Just a confirmation txn
+			$txn->store();
+		}
+
+		MeprUtils::send_resumed_sub_notices($sub);
+
+		return $sub;
+	}
+
+  	public function process_cancel_subscription($sub_id){
+		$sub = new MeprSubscription($sub_id);
+		$_REQUEST['sub_id'] = $sub_id;
+		$this->record_cancel_subscription();
+	}
 
 
-  	public function record_cancel_subscription(){}
+  	public function record_cancel_subscription(){
+		$sub = new MeprSubscription($_REQUEST['sub_id']);
+
+		if(!$sub) { return false; }
+
+		// Seriously ... if sub was already cancelled what are we doing here?
+		if($sub->status == MeprSubscription::$cancelled_str) { return $sub; }
+
+		$sub->status = MeprSubscription::$cancelled_str;
+		$sub->store();
+
+		if(isset($_REQUEST['expire']))
+			$sub->limit_reached_actions();
+
+		if(!isset($_REQUEST['silent']) || ($_REQUEST['silent'] == false))
+			MeprUtils::send_cancelled_sub_notices($sub);
+
+		return $sub;
+	}
 
  
   	public function enqueue_payment_form_scripts(){}
@@ -273,7 +361,12 @@ class MeprPesaPalGateway extends MeprBaseRealGateway {
 
 	public function validate_payment_form($errors){}
 		
-	public function display_update_account_form($subscription_id, $errors=array(), $message=""){}
+	public function display_update_account_form($sub_id, $errors=array(), $message=""){
+		?>
+		<h3><?php _e('Updating your PesaPal Account Information', 'memberpress'); ?></h3>
+		<div><?php  _e('This feature is not available on PesaPal.', 'memberpress'); ?></div>
+		<?php
+	}
 
  	public function validate_update_account_form($errors=array()){}
 
@@ -410,7 +503,18 @@ class MeprPesaPalGateway extends MeprBaseRealGateway {
 		}
 
 		MeprUtils::send_transaction_receipt_notices( $txn );
-		MeprUtils::send_cc_expiration_notices( $txn );
+	}
+
+	private function create_inovice_reminder( $sub ) {
+		$txn = new MeprTransaction();
+		$txn->subscription_id 	= $sub->id;
+		$txn->trans_num  		= $sub->subscr_id . '-' . uniqid();
+		$txn->status     		= MeprTransaction::$pending_str;
+		$txn->txn_type   		= MeprTransaction::$payment_str;
+		$txn->expires_at 		= MeprUtils::ts_to_mysql_date(time() + MeprUtils::days(1), 'Y-m-d 23:59:59');
+		$txn->set_subtotal( $sub->price );
+		$txn->store();
+		MeprUtils::send_transaction_receipt_notices( $txn );
 	}
 
 
