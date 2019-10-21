@@ -53,7 +53,9 @@ if ( !class_exists( 'MemberPress_PesaPal' ) ) :
             
             require_once( MPPPAL_PLUGIN_INCLUDES_DIR . 'pesapal/PesaPalOAuth.php' );
 
-            add_filter( 'mepr-gateway-paths', array( $this, 'init_gateway' ) );
+			add_filter( 'mepr-currency-codes', array( $this, 'currency_codes' ) );
+			add_filter( 'mepr-currency-symbols', array( $this, 'currency_symbols' ) );
+			add_filter( 'mepr-gateway-paths', array( $this, 'init_gateway' ) );
         }
 
         /**
@@ -84,8 +86,29 @@ if ( !class_exists( 'MemberPress_PesaPal' ) ) :
 			if ( ! defined( $name ) ) {
 				define( $name, $value );
 			}
-        }
-        
+		}
+		
+		function currency_codes( $codes ) {
+			if ( !in_array( 'TZS', $codes ) ) {
+				array_push( $codes, 'TZS' );
+			}
+			if ( !in_array( 'KES', $codes ) ) {
+				array_push( $codes, 'KES' );
+			}
+			return $codes;
+		}
+
+        function currency_symbols( $symbols ) {
+			if ( !in_array( 'Tsh', $symbols ) ) {
+				array_push( $symbols, 'Tsh' );
+			}
+			if ( !in_array( 'KSh', $symbols ) ) {
+				array_push( $symbols, 'KSh' );
+			}
+			return $symbols;
+		}
+		
+		
         function init_gateway( $paths ) {
             array_push( $paths, MPPPAL_PLUGIN_INCLUDES_DIR . '/gateway' );
             return $paths;
