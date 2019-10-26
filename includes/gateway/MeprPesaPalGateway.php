@@ -236,7 +236,7 @@ class MeprPesaPalGateway extends MeprBaseRealGateway {
 	public function process_trial_payment($transaction) { }
   	public function record_trial_payment($transaction) { }
 
-	public function process_refund( $txn ) {}
+	public function process_refund( MeprTransaction $txn ) {}
 	public function record_refund() {}
 
 	public function process_create_subscription( $txn ){
